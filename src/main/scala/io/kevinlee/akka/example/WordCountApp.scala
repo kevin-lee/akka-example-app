@@ -5,10 +5,10 @@ import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
 import akka.http.scaladsl.{Http, HttpExt}
 import akka.stream.ActorMaterializer
 import akka.util.ByteString
-import WebPageCollector.Collect
-import WordCountMainActor.{Count, WebPageContent}
+import io.kevinlee.akka.example.WebPageCollector.Collect
+import io.kevinlee.akka.example.WordCountMainActor.{Count, WebPageContent}
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 /**
@@ -31,9 +31,6 @@ object WordCountApp extends App {
 
 class WordCountMainActor extends Actor with ActorLogging {
   implicit val system = context.system
-
-  // needed for the future flatMap/onComplete in the end
-  implicit val executionContext = context.system.dispatcher
 
   override def receive: Receive = {
     case Count(urls) =>
@@ -59,9 +56,11 @@ object WordCountMainActor {
   def props: Props = Props(new WordCountMainActor())
 }
 
-class WebPageCollector(http: HttpExt)(implicit ec: ExecutionContext)
-  extends Actor
-     with ActorLogging {
+class WebPageCollector(http: HttpExt) extends Actor
+                                         with ActorLogging {
+  // needed for the future flatMap/onComplete in the end
+  implicit val executionContext = context.system.dispatcher
+
   implicit val materializer = ActorMaterializer()
 
   override def receive: Receive = {
@@ -98,7 +97,7 @@ object WebPageCollector {
   sealed trait Command
   case class Collect(url: String) extends Command
 
-  def props(http: HttpExt)(implicit ec: ExecutionContext): Props =
+  def props(http: HttpExt): Props =
     Props(new WebPageCollector(http))
 }
 
