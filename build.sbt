@@ -13,6 +13,8 @@ libraryDependencies ++= Seq(
   "com.typesafe.akka" %% "akka-actor" % akkaVersion,
   "com.typesafe.akka" %% "akka-http" % akkaHttpVesion,
 
+  "org.jsoup" % "jsoup" % "1.11.2",
+
   "com.typesafe.akka" %% "akka-testkit" % akkaVersion,
   "com.typesafe.akka" %% "akka-http-testkit" % akkaHttpVesion % Test,
 
