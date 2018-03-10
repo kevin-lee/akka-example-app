@@ -1,12 +1,12 @@
 package io.kevinlee.akka.example
 
-import akka.actor.{Actor, ActorLogging, ActorSystem, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Props}
 import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
 import akka.http.scaladsl.{Http, HttpExt}
 import akka.stream.ActorMaterializer
 import akka.util.ByteString
 import io.kevinlee.akka.example.WebPageCollector.Collect
-import io.kevinlee.akka.example.WordCountMainActor.{Count, WebPageContent}
+import io.kevinlee.akka.example.WordCountMainActor.{Count, WebPageContent, WebPageWordCounted}
 
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
@@ -40,9 +40,17 @@ class WordCountMainActor extends Actor with ActorLogging {
         webPageCollector ! Collect(url)
       }
 
-    case WebPageContent(content) =>
+    case WebPageContent(url, content) =>
       // send content to WordCounter
-      println(s"WebPageContent is $content")
+      val wordCounter = context.actorOf(WordCounter.props)
+      wordCounter ! WordCounter.Count(url, content)
+
+    case WebPageWordCounted(url, wordsAndCounts) =>
+      println(
+        s"""
+           |           url: $url
+           |wordsAndCounts: $wordsAndCounts
+           |""".stripMargin)
   }
 }
 
@@ -51,7 +59,8 @@ object WordCountMainActor {
   case class Count(urls: List[String]) extends Command
 
   sealed trait Result
-  case class WebPageContent(content: String) extends Result
+  case class WebPageContent(url: String, content: String) extends Result
+  case class WebPageWordCounted(url: String, wordsAndCount: Seq[(String, Int)]) extends Result
 
   def props: Props = Props(new WordCountMainActor())
 }
@@ -81,7 +90,7 @@ class WebPageCollector(http: HttpExt) extends Actor
                       .map(body => body.utf8String) onComplete {
               case Success(r) =>
                 println(s"$url - $theSender")
-                theSender ! WebPageContent(r)
+                theSender ! WebPageContent(url, r)
 
               case Failure(ex) =>
                 println(s"failed: $ex")
@@ -103,26 +112,75 @@ object WebPageCollector {
 
 
 class WordCounter extends Actor with ActorLogging {
+  private var requester: Option[ActorRef] = None
+  private var url: String = ""
+  private var count: Int = 0
+//  private var results: Seq[(String, Int)] = Vector.empty
+  private var results: Seq[Seq[(String, Int)]] = Vector.empty
+
   override def receive: Receive = {
-    case Count(content) =>
-      // extract words from the content
-      // let WordCountingWorker count the words
-      ???
+    case WordCounter.Count(url, content) =>
+      requester = Some(sender)
+      this.url = url
+      val wordsList = content.split("[\\s]+").grouped(30).toList
+      count = wordsList.length
+      wordsList.foreach { words =>
+        val wordCountingWorker = context.actorOf(WordCountingWorker.props)
+        wordCountingWorker ! WordCountingWorker.Count(words.toList)
+      }
+      context.become(receiveCounts)
   }
+
+  def receiveCounts: Receive = {
+
+    case WordCounter.CountedWords(wordsAndCounts) if count - 1 == 0 =>
+    /* last one */
+      count -= 1
+//      val finalResult = results.reduce((xs1, xs2) => accumulate(xs1, xs2))
+//      val finalResult = results.reduce(accumulate)
+      val finalResult =
+        results.headOption.fold[Seq[(String, Int)]](Vector.empty){ head =>
+          results.tail.foldLeft(head)((acc, x) => accumulate(acc, x))
+        }
+
+      requester.foreach(_ ! WebPageWordCounted(url, finalResult))
+      requester = None
+      url = ""
+      count = 0
+      results = Vector.empty
+      context.become(receive)
+
+    case WordCounter.CountedWords(wordsAndCounts) =>
+      count -= 1
+      results = results :+ wordsAndCounts
+  }
+
+  def accumulate(results: Seq[(String, Int)],
+                 wordsAndCounts: Seq[(String, Int)]): Seq[(String, Int)] =
+    (results ++ wordsAndCounts)
+      .groupBy { case (word, count) => word }
+      .map { case (word, xs) =>
+        (word, xs.map { case (_, count) => count }.sum)
+      }.toVector
 }
 
 object WordCounter {
   sealed trait Command
-  case class Count(content: String) extends Command
+  case class Count(url: String, content: String) extends Command
 
   sealed trait Result
-  case class CountedWords(wordAndCount: List[(String, Int)])
+  case class CountedWords(wordAndCount: Seq[(String, Int)]) extends Result
+
+  def props: Props = Props(new WordCounter)
 }
 
 class WordCountingWorker extends Actor with ActorLogging {
   override def receive: Receive = {
-    case Count(words) =>
-      ???
+    case WordCountingWorker.Count(words) =>
+      val wordAndCount = words.groupBy(identity)
+                              .map { case (word, ws) => (word, ws.length) }
+                              .toVector
+      sender ! WordCounter.CountedWords(wordAndCount)
   }
 }
 
@@ -130,4 +188,6 @@ object WordCountingWorker {
   sealed trait Command
 
   case class Count(words: List[String]) extends Command
+
+  def props: Props =  Props(new WordCountingWorker)
 }
