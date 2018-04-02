@@ -12,8 +12,9 @@ lazy val akkaHttpVesion = "10.0.11"
 libraryDependencies ++= Seq(
   "com.typesafe.akka" %% "akka-actor" % akkaVersion,
   "com.typesafe.akka" %% "akka-http" % akkaHttpVesion,
+  "org.jsoup" % "jsoup" % "1.11.2",
 
-  "com.typesafe.akka" %% "akka-testkit" % akkaVersion,
+  "com.typesafe.akka" %% "akka-testkit" % akkaVersion % Test,
   "com.typesafe.akka" %% "akka-http-testkit" % akkaHttpVesion % Test,
 
   "org.scalatest" %% "scalatest" % "3.0.1" % Test

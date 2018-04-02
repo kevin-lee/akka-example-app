@@ -7,6 +7,7 @@ import akka.stream.ActorMaterializer
 import akka.util.ByteString
 import io.kevinlee.akka.example.WebPageCollector.Collect
 import io.kevinlee.akka.example.WordCountMainActor.{Count, WebPageContent, WebPageWordCounted}
+import org.jsoup.Jsoup
 
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
@@ -19,21 +20,22 @@ object WordCountApp extends App {
   val system = ActorSystem("wordCountApp")
 
   val wordCountMainActor = system.actorOf(WordCountMainActor.props)
-  private val websites =
-    List(
-      "https://www.google.com.au/search?q=akka",
-      "https://www.google.com.au/search?q=scala",
-      "https://www.google.com.au/search?q=play+framework"
-    )
-  wordCountMainActor ! Count(websites)
+
+  wordCountMainActor ! Count(InputValues.websites)
 
 }
 
 class WordCountMainActor extends Actor with ActorLogging {
   implicit val system = context.system
+  var start = 0L
+  var numberOfPages = 0
+  var results = Vector.empty[(String, Seq[(String, Int)])]
 
   override def receive: Receive = {
     case Count(urls) =>
+      numberOfPages = urls.length
+      start = System.currentTimeMillis()
+
       urls.foreach { url =>
         // create WebPageCollector. It is not WebPageCollector type but ActorRef type.
         val webPageCollector = context.actorOf(WebPageCollector.props(Http()))
@@ -46,11 +48,22 @@ class WordCountMainActor extends Actor with ActorLogging {
       wordCounter ! WordCounter.Count(url, content)
 
     case WebPageWordCounted(url, wordsAndCounts) =>
-      println(
-        s"""
-           |           url: $url
-           |wordsAndCounts: $wordsAndCounts
-           |""".stripMargin)
+      numberOfPages -= 1
+      results = results :+ (url, wordsAndCounts)
+
+      if (numberOfPages == 0) {
+        val howLong = System.currentTimeMillis() - start
+        println(
+          s"""
+             |           url: $url
+             | numberOfPages: $numberOfPages
+             |wordsAndCounts: ${results.mkString("\n============\n")}
+             |""".stripMargin)
+        println(s"It took $howLong ms.")
+      }
+
+      context.stop(sender)
+
   }
 }
 
@@ -96,8 +109,10 @@ class WebPageCollector(http: HttpExt) extends Actor
                 println(s"failed: $ex")
             }
 
-          case Failure(_)   =>
-            sys.error("something wrong")
+          case Failure(error)   =>
+            sys.error(s"something wrong: $error")
+
+            self.tell(Collect(url), theSender)
         }
   }
 }
@@ -115,13 +130,13 @@ class WordCounter extends Actor with ActorLogging {
   private var requester: Option[ActorRef] = None
   private var url: String = ""
   private var count: Int = 0
-//  private var results: Seq[(String, Int)] = Vector.empty
   private var results: Seq[Seq[(String, Int)]] = Vector.empty
 
   override def receive: Receive = {
-    case WordCounter.Count(url, content) =>
+    case WordCounter.Count(url, html) =>
       requester = Some(sender)
       this.url = url
+      val content = Jsoup.parse(html).text()
       val wordsList = content.split("[\\s]+").grouped(30).toList
       count = wordsList.length
       wordsList.foreach { words =>
@@ -143,7 +158,8 @@ class WordCounter extends Actor with ActorLogging {
           results.tail.foldLeft(head)((acc, x) => accumulate(acc, x))
         }
 
-      requester.foreach(_ ! WebPageWordCounted(url, finalResult))
+      implicit val reversedInt = Ordering.Int.reverse
+      requester.foreach(_ ! WebPageWordCounted(url, finalResult.sortBy(_._2)))
       requester = None
       url = ""
       count = 0
@@ -180,6 +196,7 @@ class WordCountingWorker extends Actor with ActorLogging {
       val wordAndCount = words.groupBy(identity)
                               .map { case (word, ws) => (word, ws.length) }
                               .toVector
+                              .sortWith { case ((_, count1), (_, count2)) => count1 > count2 }
       sender ! WordCounter.CountedWords(wordAndCount)
   }
 }
