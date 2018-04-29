@@ -1,15 +1,18 @@
 package io.kevinlee.akka.example
 
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Props, Terminated}
 import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
 import akka.http.scaladsl.{Http, HttpExt}
+import akka.routing.{ActorRefRoutee, RoundRobinRoutingLogic, Router}
 import akka.stream.ActorMaterializer
 import akka.util.ByteString
-import io.kevinlee.akka.example.WebPageCollector.Collect
+import io.kevinlee.akka.example.WebPageCollector.{Collect, ProcessNext}
 import io.kevinlee.akka.example.WordCountMainActor.{Count, WebPageContent, WebPageWordCounted}
 import org.jsoup.Jsoup
 
 import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
 /**
@@ -31,6 +34,15 @@ class WordCountMainActor extends Actor with ActorLogging {
   var numberOfPages = 0
   var results = Vector.empty[(String, Seq[(String, Int)])]
 
+  var router = {
+    val routers = Vector.fill(20) {
+      val webPageCollector = context.actorOf(WebPageCollector.props(Http()))
+      context watch webPageCollector
+      ActorRefRoutee(webPageCollector)
+    }
+    Router(RoundRobinRoutingLogic(), routers)
+  }
+
   override def receive: Receive = {
     case Count(urls) =>
       numberOfPages = urls.length
@@ -38,11 +50,16 @@ class WordCountMainActor extends Actor with ActorLogging {
 
       urls.foreach { url =>
         // create WebPageCollector. It is not WebPageCollector type but ActorRef type.
-        val webPageCollector = context.actorOf(WebPageCollector.props(Http()))
-        webPageCollector ! Collect(url)
+//        val webPageCollector = context.actorOf(WebPageCollector.props(Http()))
+        router.route(Collect(url), self)
       }
 
     case WebPageContent(url, content) =>
+      log.info(
+        s""">>>
+           |    url: $url
+           |content: $content
+           |<<<""".stripMargin)
       // send content to WordCounter
       val wordCounter = context.actorOf(WordCounter.props)
       wordCounter ! WordCounter.Count(url, content)
@@ -64,6 +81,11 @@ class WordCountMainActor extends Actor with ActorLogging {
 
       context.stop(sender)
 
+    case Terminated(actor) =>
+      router = router.removeRoutee(actor)
+      val webPageCollector = context.actorOf(WebPageCollector.props(Http()))
+      context watch webPageCollector
+      router.addRoutee(webPageCollector)
   }
 }
 
@@ -85,11 +107,22 @@ class WebPageCollector(http: HttpExt) extends Actor
 
   implicit val materializer = ActorMaterializer()
 
-  override def receive: Receive = {
-    case Collect(url) =>
-      println(s"$url - $sender")
+  /*
+   * FIXME: The current solution has an obvious bug in it.
+   * It will be fixed in next Live!
+   */
+  var currentUrl: Option[(String, ActorRef)] = None
+  var urls = Vector.empty[(String, ActorRef)]
 
-      val theSender = sender
+  var count = 0
+
+  private def processUrl: Unit = urls match {
+    case head +: _ =>
+      val (url, theSender) = head
+      currentUrl = Some(url, theSender)
+      urls = urls.tail
+
+      println(s"$url - $sender")
 
       // access the web page and collect it
       val responseFuture: Future[HttpResponse] =
@@ -99,27 +132,61 @@ class WebPageCollector(http: HttpExt) extends Actor
         .onComplete {
           case Success(res) =>
             res.entity.dataBytes
-                      .runFold(ByteString(""))(_ ++ _)
-                      .map(body => body.utf8String) onComplete {
+              .runFold(ByteString(""))(_ ++ _)
+              .map(body => body.utf8String) onComplete {
               case Success(r) =>
-                println(s"$url - $theSender")
+                println(
+                  s"""
+                     |page found: $url - $theSender
+                     |theSender: $theSender
+                     |""".stripMargin)
                 theSender ! WebPageContent(url, r)
+
+                currentUrl = None
+                context.system.scheduler.scheduleOnce(100 milliseconds, self, ProcessNext)
 
               case Failure(ex) =>
                 println(s"failed: $ex")
+
+                context.system.scheduler.scheduleOnce(100 milliseconds, self, ProcessNext)
             }
 
-          case Failure(error)   =>
+          case Failure(error) =>
             sys.error(s"something wrong: $error")
 
             self.tell(Collect(url), theSender)
         }
+    case Vector() =>
+      ()
+  }
+
+  override def receive: Receive = {
+    case Collect(newUrl) =>
+      urls = urls :+ (newUrl, sender)
+      count += 1
+      log.info(
+        s"""========
+           |  name: ${self.path.name}
+           | count: $count
+           |newUrl: $newUrl
+           |  urls: $urls
+           |========
+         """.stripMargin)
+      self ! ProcessNext
+
+    case ProcessNext if currentUrl.isEmpty =>
+      processUrl
+
+    case ProcessNext =>
+      context.system.scheduler.scheduleOnce(100 milliseconds, self, ProcessNext)
   }
 }
 
 object WebPageCollector {
   sealed trait Command
   case class Collect(url: String) extends Command
+
+  case object ProcessNext extends Command
 
   def props(http: HttpExt): Props =
     Props(new WebPageCollector(http))
